@@ -1,0 +1,812 @@
+---
+title: "ARIMA_NBA"
+output: html_document
+date: "2025-06-07"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# ARIMA Model for NBA Data Set
+## Import Libraries and set working directory
+```{r}
+rm(list=ls())
+while(dev.cur() > 1) dev.off()
+# Set working directory
+setwd("C:/Users/Besitzer/OneDrive/Dokumente/CBS_Copenhagen/Semester/SS2025/Predictive Analytics/Final Exam")
+```
+
+```{r}
+library(dplyr)
+library(tseries)
+library(forecast)
+library(ggplot2)
+library(zoo)
+library(reshape2)
+library(tidyr)
+library(broom)
+library(lubridate)
+```
+
+## Load the Data and plot initally
+```{r}
+data <- read.csv("monthly_fg3_per_game_clean.csv", header = TRUE, sep = ",")
+
+# plot the data to check
+data$month <- as.Date(data$month)
+
+# Basic line plot of FG3 per game over time
+plot(data$month, data$FG3_per_game, type = "l", col = "blue", lwd = 2, xlab = "Year", ylab = "3PM per Game", main = "Monthly 3-Point Makes per Game Over Time")
+
+```
+
+## Filter our off season and data before 3 point introduction
+```{r}
+filtered_data <- subset(data, off_season == 0 & three_point_introduction == 1)
+
+# Plot the filtered data
+plot(filtered_data$month, filtered_data$FG3_per_game, type = "l",col = "blue", lwd = 2,xlab = "Year", ylab = "3PM per Game", main = "3PM per Game (In-Season, Post 3-Point Era)")
+
+```
+
+### Create subset for the eras
+```{r}
+intro_era         <- subset(filtered_data, shortened_three_point_line == 0 & reverted_three_point_line == 0)
+short_era         <- subset(filtered_data, shortened_three_point_line == 1)
+revert_era        <- subset(filtered_data, reverted_three_point_line == 1 & defensive_three_second_rule == 0 & curry_era == 0)
+defenseRule_era  <- subset(filtered_data, defensive_three_second_rule == 1 & curry_era == 0)
+curry_era         <- subset(filtered_data, curry_era == 1)
+revert_curry_era  <- subset(filtered_data, reverted_three_point_line == 1 | defensive_three_second_rule == 1 | curry_era == 1)
+
+```
+
+### Create zoo objects for each era
+```{r}
+zoo_intro        <- zoo(intro_era$FG3_per_game, order.by = intro_era$month)
+zoo_short        <- zoo(short_era$FG3_per_game, order.by = short_era$month)
+zoo_revert       <- zoo(revert_era$FG3_per_game, order.by = revert_era$month)
+zoo_defenseRule  <- zoo(defenseRule_era$FG3_per_game, order.by = defenseRule_era$month)
+zoo_curry        <- zoo(curry_era$FG3_per_game, order.by = curry_era$month)
+zoo_revert_curry <- zoo(revert_curry_era$FG3_per_game, order.by = revert_curry_era$month)
+zoo_full <- zoo(filtered_data$FG3_per_game, order.by = filtered_data$month)
+```
+
+## Preprocessing
+### Intro - Era
+```{r}
+# Plot raw time series
+plot(zoo_intro, main = "FG3 per Game - Raw", ylab = "3PM per Game", xlab = "Date")
+
+# Box-Cox transformation (auto lambda)
+lambda_intro <- BoxCox.lambda(zoo_intro)
+zoo_intro_bc <- BoxCox(zoo_intro, lambda_intro)
+plot(zoo_intro_bc, main = paste("Box-Cox Transformed (λ =", round(lambda_intro, 2), ")"))
+
+# ADF test on transformed series
+adf_result_1 <- adf.test(zoo_intro_bc)
+print(adf_result_1)
+
+# If not stationary, difference the series
+zoo_intro_diff <- diff(zoo_intro_bc)
+plot(zoo_intro_diff, main = "Differenced Box-Cox Series")
+
+# ADF test on differenced series
+adf_result_2 <- adf.test(na.omit(zoo_intro_diff))
+print(adf_result_2)
+
+# ACF and PACF plots
+par(mfrow = c(1, 2))
+acf(coredata(na.omit(zoo_intro_diff)), main = "ACF")
+pacf(coredata(na.omit(zoo_intro_diff)), main = "PACF")
+par(mfrow = c(1, 1))
+```
+  - ACF plot shows a strong spike at lag 1, followed by rapid drop-off and mostly insignificant lags afterward.
+  
+  - This suggests the presence of a Moving Average (MA) component, likely `q = 1`.
+  
+  - PACF plot reveals many significant negative spikes up to lag 10, then a tapering pattern.
+  
+  - This long tail in PACF is characteristic of an Autoregressive (AR) process with several terms.
+  
+  - The ADF test after differencing confirms the series is stationary.
+  
+  - Based on these diagnostics, the following ARIMA models are worth comparing:
+  
+    - ARIMA(3,1,1): Captures moderate AR structure with a simple MA term.
+    
+    - ARIMA(5,1,1): Allows for the longer AR tail observed in the PACF plot.
+    
+
+### Short - Era
+```{r}
+# Plot raw time series
+plot(zoo_short, main = "FG3 per Game - Shortened Line Era (Raw)", ylab = "3PM per Game", xlab = "Date")
+
+# Box-Cox transformation (auto lambda)
+lambda_short <- BoxCox.lambda(zoo_short)
+zoo_short_bc <- BoxCox(zoo_short, lambda_short)
+plot(zoo_short_bc, main = paste("Box-Cox Transformed (λ =", round(lambda_short, 2), ")"))
+
+# ADF test on transformed series
+adf_result_short_1 <- adf.test(coredata(zoo_short_bc))
+print(adf_result_short_1)
+
+# If not stationary, difference the series
+zoo_short_diff <- diff(zoo_short_bc)
+plot(zoo_short_diff, main = "Differenced Box-Cox Series (Short Era)")
+
+# ADF test on differenced series
+adf_result_short_2 <- adf.test(coredata(na.omit(zoo_short_diff)))
+print(adf_result_short_2)
+
+# ACF and PACF plots
+par(mfrow = c(1, 2))
+acf(coredata(na.omit(zoo_short_diff)), main = "ACF - Short Era")
+pacf(coredata(na.omit(zoo_short_diff)), main = "PACF - Short Era")
+par(mfrow = c(1, 1))
+```
+  - ACF plot shows a strong spike at lag 1 and then cuts off quickly, suggesting an MA(1) process.
+  
+  - PACF displays several small negative spikes, with a potential tail-off pattern, but no clear AR structure.
+  
+  - The short length of the time series may limit reliability of deeper AR or MA terms.
+  
+  - The ADF test confirms the differenced series is stationary.
+  
+  - Due to the small sample size and clear ACF cutoff, simple models are preferred:
+  
+    - ARIMA(0,1,1): A minimal model with only a Moving Average component.
+    
+    - ARIMA(1,1,1): Adds a basic AR term in case there’s minor autocorrelation in the PACF.
+
+
+### Revert - Era
+```{r}
+# Plot raw time series
+plot(zoo_revert, main = "FG3 per Game - Reverted Line Era (Raw)", ylab = "3PM per Game", xlab = "Date")
+
+# Box-Cox transformation (auto lambda)
+lambda_revert <- BoxCox.lambda(zoo_revert)
+zoo_revert_bc <- BoxCox(zoo_revert, lambda_revert)
+plot(zoo_revert_bc, main = paste("Box-Cox Transformed (λ =", round(lambda_revert, 2), ")"))
+
+# ADF test on transformed series
+adf_result_revert_1 <- adf.test(coredata(zoo_revert_bc))
+print(adf_result_revert_1)
+
+# If not stationary, difference the series
+zoo_revert_diff <- diff(zoo_revert_bc)
+plot(zoo_revert_diff, main = "Differenced Box-Cox Series (Reverted Era)")
+
+# ADF test on differenced series
+adf_result_revert_2 <- adf.test(coredata(na.omit(zoo_revert_diff)))
+print(adf_result_revert_2)
+
+# ACF and PACF plots
+par(mfrow = c(1, 2))
+acf(coredata(na.omit(zoo_revert_diff)), main = "ACF - Reverted Era")
+pacf(coredata(na.omit(zoo_revert_diff)), main = "PACF - Reverted Era")
+par(mfrow = c(1, 1))
+
+```
+  - ACF plot shows a strong spike at lag 1 and multiple smaller positive autocorrelations up to lag 12, indicating persistence in the series.
+  
+  - PACF shows a clear spike at lag 1, followed by mostly insignificant or weak negative values.
+  
+  - This pattern suggests an ARIMA process with both autoregressive and moving average components.
+  
+  - The ADF test after differencing confirms the series is stationary.
+  
+  - Based on the diagnostic plots, two reasonable ARIMA model candidates are:
+  
+    - ARIMA(2,1,1): Captures short AR and MA behavior suggested by initial PACF/ACF cutoffs.
+    
+    - ARIMA(3,1,1): Slightly more flexible in case of lingering autocorrelation in residuals.
+
+
+### Defense Rule - Era
+```{r}
+# Plot raw time series
+plot(zoo_defenseRule, main = "FG3 per Game - Defensive 3-Second Rule Era (Raw)", ylab = "3PM per Game", xlab = "Date")
+
+# Box-Cox transformation (auto lambda)
+lambda_defenseRule <- BoxCox.lambda(zoo_defenseRule)
+zoo_defenseRule_bc <- BoxCox(zoo_defenseRule, lambda_defenseRule)
+plot(zoo_defenseRule_bc, main = paste("Box-Cox Transformed (λ =", round(lambda_defenseRule, 2), ")"))
+
+# ADF test on transformed series
+adf_result_defense_1 <- adf.test(coredata(zoo_defenseRule_bc))
+print(adf_result_defense_1)
+
+# If not stationary, difference the series
+zoo_defenseRule_diff <- diff(zoo_defenseRule_bc)
+plot(zoo_defenseRule_diff, main = "Differenced Box-Cox Series (Defense Rule Era)")
+
+# ADF test on differenced series
+adf_result_defense_2 <- adf.test(coredata(na.omit(zoo_defenseRule_diff)))
+print(adf_result_defense_2)
+
+# ACF and PACF plots
+par(mfrow = c(1, 2))
+acf(coredata(na.omit(zoo_defenseRule_diff)), main = "ACF - Defense Rule Era")
+pacf(coredata(na.omit(zoo_defenseRule_diff)), main = "PACF - Defense Rule Era")
+par(mfrow = c(1, 1))
+```
+  - ACF plot shows a significant spike at lag 1 and minor positive autocorrelations persisting through multiple lags.
+  
+  - PACF plot exhibits a strong initial drop followed by a long tail of alternating small spikes, mostly negative.
+  
+  - This pattern suggests a dominant AR component with a long memory, while ACF indicates potential for mild MA
+  behavior.
+  - The ADF test on the differenced series confirms stationarity.
+  
+  - Based on these observations, two suitable ARIMA model candidates are:
+  
+    - ARIMA(4,1,1): Captures the decaying AR tail and a short MA component.
+    
+    - ARIMA(5,1,0): Focuses on the long autoregressive structure without overfitting moving average terms.
+
+
+### Curry - Era
+```{r}
+# Plot raw time series
+plot(zoo_curry, main = "FG3 per Game - Curry Era (Raw)", ylab = "3PM per Game", xlab = "Date")
+
+# Box-Cox transformation (auto lambda)
+lambda_curry <- BoxCox.lambda(zoo_curry)
+zoo_curry_bc <- BoxCox(zoo_curry, lambda_curry)
+plot(zoo_curry_bc, main = paste("Box-Cox Transformed (λ =", round(lambda_curry, 2), ")"))
+
+# ADF test on transformed series
+adf_result_curry_1 <- adf.test(coredata(zoo_curry_bc))
+print(adf_result_curry_1)
+
+# If not stationary, difference the series
+zoo_curry_diff <- diff(zoo_curry_bc)
+plot(zoo_curry_diff, main = "Differenced Box-Cox Series (Curry Era)")
+
+# ADF test on differenced series
+adf_result_curry_2 <- adf.test(coredata(na.omit(zoo_curry_diff)))
+print(adf_result_curry_2)
+
+# ACF and PACF plots
+par(mfrow = c(1, 2))
+acf(coredata(na.omit(zoo_curry_diff)), main = "ACF - Curry Era")
+pacf(coredata(na.omit(zoo_curry_diff)), main = "PACF - Curry Era")
+par(mfrow = c(1, 1))
+
+```
+  - ACF plot shows a strong spike at lag 1 followed by a sharp drop and low values beyond, suggesting a short-term MA
+  component.
+  
+  - PACF reveals significant negative spikes at early lags (1 to ~6), followed by a gradual decline.
+  
+  - This pattern points to a longer AR structure with a prominent initial response.
+  
+  - The ADF test confirms that the differenced series is stationary.
+  
+  - Based on these observations, two appropriate ARIMA model candidates are:
+  
+    - ARIMA(3,1,1): Balances a modest AR tail with a short MA component.
+    
+    - ARIMA(4,1,1): Captures the extended PACF tail more fully while maintaining a single MA term.
+
+
+### Revert Curry - Era (Modern Era)
+```{r}
+# Plot raw time series
+plot(zoo_revert_curry, main = "FG3 per Game - Modern (Raw)", ylab = "3PM per Game", xlab = "Date")
+
+# Box-Cox transformation (auto lambda)
+lambda_revert_curry <- BoxCox.lambda(zoo_revert_curry)
+zoo_revert_curry_bc <- BoxCox(zoo_revert_curry, lambda_revert_curry)
+plot(zoo_revert_curry_bc, main = paste("Box-Cox Transformed (λ =", round(lambda_revert_curry, 2), ")"))
+
+# ADF test on transformed series
+adf_result_rc_1 <- adf.test(coredata(zoo_revert_curry_bc))
+print(adf_result_rc_1)
+
+# If not stationary, difference the series
+zoo_revert_curry_diff <- diff(zoo_revert_curry_bc)
+plot(zoo_revert_curry_diff, main = "Differenced Box-Cox Series (Modern Era)")
+
+# ADF test on differenced series
+adf_result_rc_2 <- adf.test(coredata(na.omit(zoo_revert_curry_diff)))
+print(adf_result_rc_2)
+
+# ACF and PACF plots
+par(mfrow = c(1, 2))
+acf(coredata(na.omit(zoo_revert_curry_diff)), main = "ACF - Modern Era")
+pacf(coredata(na.omit(zoo_revert_curry_diff)), main = "PACF - Modern Era")
+par(mfrow = c(1, 1))
+
+```
+  - ACF plot shows a very strong spike at lag 1 followed by rapid drop-off and minor fluctuations, indicating a strong
+  Moving Average (MA) component.
+  
+  - PACF plot displays a long sequence of significant negative values (lags 1–10+) with gradual decay, suggesting a
+  high-order Autoregressive (AR) process.
+  
+  - The combination of a sharp ACF cut-off and a long PACF tail is characteristic of an ARIMA model with a dominant AR
+  component.
+  
+  - The ADF test on the differenced series confirms it is stationary.
+  
+  - Based on these observations, the following ARIMA models are appropriate to compare:
+    
+    - ARIMA(4,1,1): Captures the moderate AR tail and initial MA structure.
+    
+    - ARIMA(6,1,1): Allows for deeper AR structure suggested by extended PACF spikes.
+    
+### Full Data Set Model
+```{r}
+# Plot raw time series
+plot(zoo_full, main = "FG3 per Game - Full (Raw)", ylab = "3PM per Game", xlab = "Date")
+
+# Box-Cox transformation (auto lambda)
+lambda_full <- BoxCox.lambda(zoo_full)
+zoo_full_bc <- BoxCox(zoo_full, lambda_full)
+plot(zoo_full_bc, main = paste("Box-Cox Transformed (λ =", round(lambda_full, 2), ")"))
+
+# ADF test on transformed series
+adf_result_full_1 <- adf.test(coredata(zoo_full_bc))
+print(adf_result_full_1)
+
+# If not stationary, difference the series
+zoo_full_diff <- diff(zoo_full_bc)
+plot(zoo_full_diff, main = "Differenced Box-Cox Series (Full)")
+
+# ADF test on differenced series
+adf_result_full_2 <- adf.test(coredata(na.omit(zoo_full_diff)))
+print(adf_result_full_2)
+
+# ACF and PACF plots
+par(mfrow = c(1, 2))
+acf(coredata(na.omit(zoo_full_diff)), main = "ACF - Full")
+pacf(coredata(na.omit(zoo_full_diff)), main = "PACF - Full")
+par(mfrow = c(1, 1))
+
+```
+
+    
+## Model Selection and Comparison
+### Intro - Era
+```{r}
+fit_intro_1      <- Arima(coredata(zoo_intro_bc), order = c(1,1,1))
+fit_intro_2      <- Arima(coredata(zoo_intro_bc), order = c(2,1,1))
+fit_intro_auto   <- auto.arima(coredata(zoo_intro_bc), lambda = lambda_intro, seasonal = FALSE)
+
+models_intro <- list(
+  arima_1_1_1 = fit_intro_1,
+  arima_2_1_1 = fit_intro_2,
+  auto_arima  = fit_intro_auto
+)
+results_intro <- bind_rows(lapply(models_intro, glance), .id = "model")
+print(results_intro)
+```
+
+### Short - Era
+```{r}
+fit_short_1    <- Arima(coredata(zoo_short_bc), order = c(0,1,1))
+fit_short_2    <- Arima(coredata(zoo_short_bc), order = c(1,1,1))
+fit_short_auto <- auto.arima(coredata(zoo_short_bc), lambda = lambda_short, seasonal = FALSE)
+
+models_short <- list(
+  arima_0_1_1 = fit_short_1,
+  arima_1_1_1 = fit_short_2,
+  auto_arima  = fit_short_auto
+)
+results_short <- bind_rows(lapply(models_short, glance), .id = "model")
+print(results_short)
+```
+
+### Revert - Era
+```{r}
+fit_revert_1    <- Arima(coredata(zoo_revert_bc), order = c(2,1,1))
+fit_revert_2    <- Arima(coredata(zoo_revert_bc), order = c(3,1,1))
+fit_revert_auto <- auto.arima(coredata(zoo_revert_bc), lambda = lambda_revert, seasonal = FALSE)
+
+models_revert <- list(
+  arima_2_1_1 = fit_revert_1,
+  arima_3_1_1 = fit_revert_2,
+  auto_arima  = fit_revert_auto
+)
+results_revert <- bind_rows(lapply(models_revert, glance), .id = "model")
+print(results_revert)
+
+```
+
+### Defense Rule - Era
+```{r}
+fit_defense_1    <- Arima(coredata(zoo_defenseRule_bc), order = c(4,1,1))
+fit_defense_2    <- Arima(coredata(zoo_defenseRule_bc), order = c(5,1,0))
+fit_defense_auto <- auto.arima(coredata(zoo_defenseRule_bc), lambda = lambda_defenseRule, seasonal = FALSE)
+
+models_defense <- list(
+  arima_4_1_1 = fit_defense_1,
+  arima_5_1_0 = fit_defense_2,
+  auto_arima  = fit_defense_auto
+)
+results_defense <- bind_rows(lapply(models_defense, glance), .id = "model")
+print(results_defense)
+
+```
+
+### Curry - Era
+```{r}
+fit_curry_1    <- Arima(coredata(zoo_curry_bc), order = c(3,1,1))
+fit_curry_2    <- Arima(coredata(zoo_curry_bc), order = c(4,1,1))
+fit_curry_auto <- auto.arima(coredata(zoo_curry_bc), lambda = lambda_curry, seasonal = FALSE)
+
+models_curry <- list(
+  arima_3_1_1 = fit_curry_1,
+  arima_4_1_1 = fit_curry_2,
+  auto_arima  = fit_curry_auto
+)
+results_curry <- bind_rows(lapply(models_curry, glance), .id = "model")
+print(results_curry)
+
+```
+
+### Modern - Era
+```{r}
+fit_modern_1    <- Arima(coredata(zoo_revert_curry_bc), order = c(6,1,1))
+fit_modern_2    <- Arima(coredata(zoo_revert_curry_bc), order = c(8,1,1))
+fit_modern_auto <- auto.arima(coredata(zoo_revert_curry_bc), lambda = lambda_revert_curry, seasonal = FALSE)
+
+models_modern <- list(
+  arima_6_1_1 = fit_modern_1,
+  arima_8_1_1 = fit_modern_2,
+  auto_arima  = fit_modern_auto
+)
+results_modern <- bind_rows(lapply(models_modern, glance), .id = "model")
+print(results_modern)
+
+```
+### Full Data Set Model
+```{r}
+fit_full_1    <- Arima(coredata(zoo_full_bc), order = c(6,1,1))
+fit_full_2    <- Arima(coredata(zoo_full_bc), order = c(8,1,1))
+fit_full_auto <- auto.arima(coredata(zoo_full_bc), lambda = lambda_full, seasonal = FALSE)
+
+models_full <- list(
+  arima_6_1_1 = fit_full_1,
+  arima_8_1_1 = fit_full_2,
+  auto_arima  = fit_full_auto
+)
+results_full <- bind_rows(lapply(models_full, glance), .id = "model")
+print(results_full)
+
+```
+
+
+
+### Summary of Results
+- **Intro Era**:  
+  The ARIMA(1,1,1) model performs best with the lowest AIC (32.22) and BIC (40.68), and a low sigma (0.1595). ARIMA(2,1,1) has slightly higher AIC/BIC, while `auto.arima()` performs poorly with a much higher AIC (451.56) and sigma (1.455).  
+  **Selected model:** `ARIMA(1,1,1)`
+
+- **Shortened Line Era**:  
+  ARIMA(0,1,1) has the lowest AIC (-122.28) and BIC (-120.01), and a lower sigma than `auto.arima`. Although ARIMA(1,1,1) has a lower sigma, its AIC/BIC are worse. `auto.arima()` again performs worse.  
+  **Selected model:** `ARIMA(0,1,1)`
+
+- **Reverted Era**:  
+  The `auto.arima()` model clearly outperforms manual models, with the best AIC (-55.61), BIC (-52.75), and lowest sigma (0.0940). Manual models like ARIMA(2,1,1) and (3,1,1) are notably worse.  
+  **Selected model:** `auto.arima()`
+
+- **Defensive Rule Era**:  
+  Again, `auto.arima()` is the best performer with the lowest AIC (-213.55), BIC (-208.04), and the smallest sigma (0.0951). Manual models such as ARIMA(4,1,1) and (5,1,0) have higher AIC/BIC and sigma.  
+  **Selected model:** `auto.arima()`
+
+- **Curry Era**:  
+  ARIMA(3,1,1) is preferred with the lowest AIC (54.19) and sigma (0.0072). ARIMA(4,1,1) performs slightly worse in both AIC and BIC. The `auto.arima()` model performs poorly again with an extremely high AIC (130.36) and sigma (0.7545).  
+  **Selected model:** `ARIMA(3,1,1)`
+
+- **Modern Era (Revert + Defense + Curry)**:  
+  ARIMA(6,1,1) is the top choice with the best AIC (80.62), BIC (107.09), and lowest sigma (0.0814). ARIMA(4,1,1) is a weaker alternative. The `auto.arima()` model again shows poor performance with very high AIC (394.40) and sigma (0.6345).  
+  **Selected model:** `ARIMA(6,1,1)`
+
+### Fit each model on its respective era
+```{r}
+# 1) Intro Era --------------------------------------------------------------
+
+# Fit on the numeric Box–Cox series
+fit_intro <- Arima(coredata(zoo_intro_bc), order = c(1,1,1))
+
+# Extract & back‐transform fitted values
+back_fitted_i <- InvBoxCox(fitted(fit_intro), lambda_intro)
+
+# Align into zoo with the exact original dates
+fitted_intro_zoo <- zoo(back_fitted_i, index(zoo_intro_bc))
+
+# Plot
+plot(zoo_intro, col="black", lwd=1.5,
+     main="Intro Era: Actual vs Fitted", ylab="3PM per Game", xlab="Date")
+lines(fitted_intro_zoo, col="red", lwd=1.5)
+legend("topleft", legend=c("Actual","Fitted"), col=c("black","red"), lty=1)
+
+
+
+# 2) Shortened Line Era -----------------------------------------------------
+
+fit_short <- Arima(coredata(zoo_short_bc), order = c(0,1,1))
+back_fitted_s <- InvBoxCox(fitted(fit_short), lambda_short)
+fitted_short_zoo <- zoo(back_fitted_s, index(zoo_short_bc))
+
+plot(zoo_short, col="black", lwd=1.5,
+     main="Shortened Line Era: Actual vs Fitted", ylab="3PM per Game", xlab="Date")
+lines(fitted_short_zoo, col="red", lwd=1.5)
+
+
+
+# 3) Reverted Era ------------------------------------------------------------
+
+fit_revert <- auto.arima(coredata(zoo_revert_bc), lambda=lambda_revert, seasonal=FALSE)
+back_fitted_r <- InvBoxCox(fitted(fit_revert), lambda_revert)
+fitted_revert_zoo <- zoo(back_fitted_r, index(zoo_revert_bc))
+
+plot(zoo_revert, col="black", lwd=1.5,
+     main="Reverted Era: Actual vs Fitted", ylab="3PM per Game", xlab="Date")
+lines(fitted_revert_zoo, col="red", lwd=1.5)
+
+
+
+# 4) Defensive 3-Second Rule Era -------------------------------------------
+
+fit_defense <- auto.arima(coredata(zoo_defenseRule_bc), lambda=lambda_defenseRule, seasonal=FALSE)
+back_fitted_d <- InvBoxCox(fitted(fit_defense), lambda_defenseRule)
+fitted_defense_zoo <- zoo(back_fitted_d, index(zoo_defenseRule_bc))
+
+plot(zoo_defenseRule, col="black", lwd=1.5,
+     main="Defensive 3-Second Rule Era: Actual vs Fitted", ylab="3PM per Game", xlab="Date")
+lines(fitted_defense_zoo, col="red", lwd=1.5)
+
+
+
+# 5) Curry Era --------------------------------------------------------------
+
+fit_curry <- Arima(coredata(zoo_curry_bc), order = c(3,1,1))
+back_fitted_c <- InvBoxCox(fitted(fit_curry), lambda_curry)
+fitted_curry_zoo <- zoo(back_fitted_c, index(zoo_curry_bc))
+
+plot(zoo_curry, col="black", lwd=1.5,
+     main="Curry Era: Actual vs Fitted", ylab="3PM per Game", xlab="Date")
+lines(fitted_curry_zoo, col="red", lwd=1.5)
+
+```
+### Combine fitted values
+```{r}
+# Combine all actuals and fitted segment series into one full zoo and plot together
+
+# 1) Build the full actual series
+full_actual <- zoo(filtered_data$FG3_per_game, order.by = filtered_data$month)
+
+# 2) Combine each fitted segment into one big zoo object
+all_fitted <- do.call(merge, list(
+  fitted_intro_zoo,
+  fitted_short_zoo,
+  fitted_revert_zoo,
+  fitted_defense_zoo,
+  fitted_curry_zoo
+))
+# Rename columns
+colnames(all_fitted) <- c("Intro","Short","Revert","Defense","Curry")
+
+# 3) Plot
+plot(full_actual, col = "black", lwd = 1.5,
+     main = "Actual vs EraSpecific Fitted Values (ARIMA)",
+     ylab = "3PM per Game", xlab = "Date")
+
+# Add each fitted line
+cols <- c("red","blue","green","purple","orange")
+for(i in seq_len(ncol(all_fitted))) {
+  lines(all_fitted[,i], col = cols[i], lwd = 1.5)
+}
+
+# 4) Legend
+legend("topleft",
+       legend = c("Actual", colnames(all_fitted)),
+       col    = c("black", cols),
+       lty    = 1,
+       lwd    = 1.5)
+
+```
+## Test Models on unseen data (Using Test-Train Split)
+```{r}
+# 1) Split at 2019-10-01
+train_data <- subset(filtered_data, month < as.Date("2019-10-01"))
+test_data  <- subset(filtered_data, month >= as.Date("2019-10-01"))
+# Convert test to zoo objects
+zoo_test  <- zoo(test_data$FG3_per_game, order.by = test_data$month)
+
+# 2) Curry‐Only Model
+curry_train_df <- subset(train_data, curry_era == 1)
+z_curry_tr     <- zoo(curry_train_df$FG3_per_game, order.by = curry_train_df$month)
+lam_curry      <- BoxCox.lambda(z_curry_tr)
+ts_curry_tr    <- coredata(BoxCox(z_curry_tr, lam_curry))
+fit_curry_tr   <- Arima(ts_curry_tr, order = c(3,1,1), include.drift=TRUE)
+fc_curry       <- forecast(fit_curry_tr, h = nrow(test_data))
+# back‐transform and wrap as zoo
+zoo_fc_curry <- zoo(
+  InvBoxCox(as.numeric(fc_curry$mean), lam_curry),
+  order.by = test_data$month
+)
+
+# 3) Modern‐Era Model (Revert + Defense + Curry)
+modern_train_df <- subset(train_data,
+  reverted_three_point_line == 1 |
+  defensive_three_second_rule == 1 |
+  curry_era == 1
+)
+z_mod_tr      <- zoo(modern_train_df$FG3_per_game, order.by = modern_train_df$month)
+lam_modern    <- BoxCox.lambda(z_mod_tr)
+ts_mod_tr     <- coredata(BoxCox(z_mod_tr, lam_modern))
+fit_modern_tr <- Arima(ts_mod_tr, order = c(8,1,1), include.drift=TRUE)
+fc_modern     <- forecast(fit_modern_tr, h = nrow(test_data))
+zoo_fc_modern <- zoo(
+  InvBoxCox(as.numeric(fc_modern$mean), lam_modern),
+  order.by = test_data$month
+)
+
+#Full Data Model
+
+# 1) Build the zoo on the training portion
+z_full_tr  <- zoo(train_data$FG3_per_game, order.by = train_data$month)
+
+# 2) Choose Box–Cox λ for that training series
+lam_full   <- BoxCox.lambda(z_full_tr)
+
+# 3) Apply Box–Cox & pull out the numeric vector
+ts_full_tr <- coredata(BoxCox(z_full_tr, lam_full))
+
+# 4) Fit ARIMA(8,1,1)+drift on that numeric vector
+fit_full_tr <- Arima(ts_full_tr, order = c(8,1,1), include.drift = TRUE)
+
+# 5) Forecast h = length of your test set
+fc_full     <- forecast(fit_full_tr, h = nrow(test_data))
+
+# 6) Invert back to original scale and wrap into zoo over the test dates
+zoo_fc_full <- zoo(
+  InvBoxCox(as.numeric(fc_full$mean), lam_full),
+  order.by = test_data$month
+)
+
+# 4) Prepare data frames for ggplot
+# Historical full series
+df_hist <- data.frame(
+  date  = filtered_data$month,
+  value = filtered_data$FG3_per_game,
+  series = "Historical"
+)
+
+# Curry‐only forecast (test period)
+df_curry_fc <- data.frame(
+  date  = index(zoo_fc_curry),
+  value = coredata(zoo_fc_curry),
+  series = "Forecast_Curry"
+)
+
+# Modern‐era forecast (test period)
+df_modern_fc <- data.frame(
+  date  = index(zoo_fc_modern),
+  value = coredata(zoo_fc_modern),
+  series = "Forecast_Modern"
+)
+
+# Full Data Model
+df_full_fc <- data.frame(
+  date  = index(zoo_fc_full),
+  value = coredata(zoo_fc_full),
+  series = "Forecast_Full"
+)
+
+
+# 5) Combine and plot
+df_plot <- rbind(df_hist, df_curry_fc, df_modern_fc, df_full_fc)
+
+ggplot(df_plot, aes(x = date, y = value, color = series)) +
+  geom_line(data = subset(df_plot, series == "Historical"),     size = 0.8) +
+  geom_line(data = subset(df_plot, series == "Forecast_Modern"), size = 0.8) +
+  geom_line(data = subset(df_plot, series == "Forecast_Curry"),  size = 0.8) +
+  geom_line(data = subset(df_plot, series == "Forecast_Full"), size = 0.8) +
+  scale_color_manual(
+    values = c(
+      Historical      = "grey",
+      Forecast_Modern = "green",
+      Forecast_Curry  = "blue",
+      Forecast_Full   = "orange"
+    ),
+    labels = c(
+      Historical      = "Historical/Actual",
+      Forecast_Modern = "ModernEra Forecast",
+      Forecast_Curry  = "CurryOnly Forecast",
+      Forecast_Full   = "FullData Forecast"
+    )
+  ) +
+  labs(
+    title = "FG3 per Game: Historical vs Forecasts (ARIMA)",
+    x     = "Date",
+    y     = "3PM per Game",
+    color = ""   # removes the legend title
+  ) +
+  theme_minimal()
+
+```
+### Check Paramters
+```{r}
+summary(fit_curry_tr)
+summary(fit_modern_tr)
+summary(fit_full_tr)
+```
+
+
+
+### Check residuals of the models
+```{r}
+checkresiduals(fit_curry_tr)
+checkresiduals(fit_modern_tr)
+checkresiduals(fit_full_tr)
+```
+  - **Curry‐Only Model (ARIMA(3,1,1) with drift)**  
+  
+    - Ljung–Box test: Q* = 3.45, df = 4, p = 0.486 → no evidence of residual autocorrelation. 
+    
+    - Residuals fluctuate randomly around zero with no visible trend or clustering.  
+    
+    - ACF of residuals: all lags within confidence bounds, confirming whiteness.  
+    
+    - Histogram: roughly bell‐shaped and centered at zero, indicating approximate normality.  
+    
+    - **Conclusion:** Diagnostics support that the ARIMA(3,1,1)+drift model is well‐specified for the Curry era.
+  
+  - **Modern‐Era Model (ARIMA(6,1,1) with drift)**  
+  
+    - Ljung–Box test: Q* = 12.23, df = 3, p = 0.0067 → significant autocorrelation remains.  
+    
+    - Residual time plot: shows occasional spikes and minor cyclic patterns.  
+    
+    - ACF of residuals: several spikes exceed the confidence bounds (e.g. at lags ~9 and ~16), indicating unmodeled
+    structure.  
+    - Histogram: heavier tails than normal, with more extreme residuals. 
+    
+    - **Conclusion:** The ARIMA(6,1,1)+drift model leaves autocorrelation in the residuals—consider adding higher‐order
+    terms.  
+
+## Calculate accuracy metrics
+```{r}
+# Extract the numeric actuals from the zoo
+actual_test <- coredata(zoo_test)
+
+# Compute accuracy
+acc_curry  <- accuracy(fc_curry,  actual_test)
+acc_modern <- accuracy(fc_modern, actual_test)
+acc_full   <- accuracy(fc_full,   actual_test)
+
+# Combine into one data frame with model labels
+acc_comparison <- rbind(
+  data.frame(Model = "Curry-Only",    acc_curry),
+  data.frame(Model = "Modern-Era",    acc_modern),
+  data.frame(Model = "Full Data Set", acc_full)
+)
+
+# Print the comparison
+print(acc_comparison)
+```
+**Comparison & Interpretation**  
+
+  - Both ARIMA models achieve near‐zero errors in‐sample but catastrophically overfit, as test RMSE/MAE jump by two   
+  orders of magnitude.  
+  
+  - The Modern‐Era ARIMA outperforms the Curry‐Only ARIMA on every out‐of‐sample metric (lower RMSE, MAE, MAPE and
+  MASE).  
+  - The enormous MASE values show that even the better model is far worse than a naïve seasonal forecast.  
+ 
+  - If forced to choose, use the Modern-Era for slightly better hold-out performance—but overall, neither model is
+  reliable for forecasting.  
+
+
+
+
+
+

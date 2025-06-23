@@ -1,0 +1,316 @@
+---
+title: "ETS_NBA"
+output:
+  pdf_document: default
+  html_document: default
+date: "2025-06-04"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# ETS Model for NBA Data Set
+## Import Libraries and set working directory
+```{r}
+library(dplyr)
+library(tseries)
+library(forecast)
+library(ggplot2)
+library(zoo)
+library(reshape2)
+library(seastests)
+
+
+
+rm(list=ls())
+while(dev.cur() > 1) dev.off()
+# Set working directory
+setwd("C:/Users/Besitzer/OneDrive/Dokumente/CBS_Copenhagen/Semester/SS2025/Predictive Analytics/Final Exam")
+```
+
+## Load the Data and plot initally
+```{r}
+data <- read.csv("monthly_fg3_per_game_clean.csv", header = TRUE, sep = ",")
+
+# plot the data to check
+data$month <- as.Date(data$month)
+
+# Basic line plot of FG3 per game over time
+plot(data$month, data$FG3_per_game, type = "l", col = "blue", lwd = 2, xlab = "Year", ylab = "3PM per Game", main = "Monthly 3-Point Makes per Game Over Time")
+
+```
+
+## Filter our off season and data before 3 point introduction
+```{r}
+filtered_data <- subset(data, off_season == 0 & three_point_introduction == 1)
+
+# Plot the filtered data
+plot(filtered_data$month, filtered_data$FG3_per_game, type = "l",col = "blue", lwd = 2,xlab = "Year", ylab = "3PM per Game", main = "3PM per Game (In-Season, Post 3-Point Era)")
+
+```
+## Fit ETS models for the time periods (using the dummy variables)
+
+### Create subset for the eras
+```{r}
+intro_era         <- subset(filtered_data, shortened_three_point_line == 0 & reverted_three_point_line == 0)
+short_era         <- subset(filtered_data, shortened_three_point_line == 1)
+revert_era        <- subset(filtered_data, reverted_three_point_line == 1 & defensive_three_second_rule == 0 & curry_era == 0)
+defenseRule_era  <- subset(filtered_data, defensive_three_second_rule == 1 & curry_era == 0)
+curry_era         <- subset(filtered_data, curry_era == 1)
+revert_curry_era  <- subset(filtered_data, reverted_three_point_line == 1 | defensive_three_second_rule == 1 | curry_era == 1)
+```
+
+### Convert each subset to a time series
+```{r}
+ts_filtered <- ts(filtered_data$FG3_per_game, start = c(1979, 10), frequency = 8)
+ts_intro   <- ts(intro_era$FG3_per_game,   start = c(1979, 10), frequency = 8)
+ts_short   <- ts(short_era$FG3_per_game,   start = c(1994, 10), frequency = 8)
+ts_revert  <- ts(revert_era$FG3_per_game,  start = c(1997, 10), frequency = 8)
+ts_defense <- ts(defenseRule_era$FG3_per_game, start = c(1997, 10), frequency = 8)
+ts_curry   <- ts(curry_era$FG3_per_game,   start = c(2015, 10),  frequency = 8)
+ts_revert_curry <- ts(revert_curry_era$FG3_per_game, start = c(1997, 10), frequency = 8)
+
+```
+
+```{r}
+decomp_diff <- stl(ts_filtered, s.window = "periodic")
+plot(decomp_diff)
+print(isSeasonal(ts_filtered))
+```
+```{r}
+seasonplot(ts_filtered, col = rainbow(20), year.labels = TRUE, main = "Seasonal Pattern")
+```
+
+
+
+### Fit ETS models for each era
+```{r}
+fit_intro  <- ets(ts_intro)
+fit_short  <- ets(ts_short)
+fit_revert <- ets(ts_revert)
+fit_defense <- ets(ts_defense)
+fit_curry  <- ets(ts_curry)
+```
+
+### Combine fitted values into one full timeline
+```{r}
+# 1) Full actual series as zoo
+full_actual <- zoo(
+  filtered_data$FG3_per_game,
+  order.by = filtered_data$month
+)
+
+# 2) Turn each ETS fit (ts) into a zoo, using the same dates you used to build the ts
+fitted_intro_zoo   <- zoo(as.numeric(fitted(fit_intro)),   order.by = intro_era$month)
+fitted_short_zoo   <- zoo(as.numeric(fitted(fit_short)),   order.by = short_era$month)
+fitted_revert_zoo  <- zoo(as.numeric(fitted(fit_revert)),  order.by = revert_era$month)
+fitted_defense_zoo <- zoo(as.numeric(fitted(fit_defense)), order.by = defenseRule_era$month)
+fitted_curry_zoo   <- zoo(as.numeric(fitted(fit_curry)),   order.by = curry_era$month)
+
+# 3) Merge into one multi‐column zoo
+all_fitted <- do.call(merge, list(
+  fitted_intro_zoo,
+  fitted_short_zoo,
+  fitted_revert_zoo,
+  fitted_defense_zoo,
+  fitted_curry_zoo
+))
+colnames(all_fitted) <- c("Intro","Short","Revert","Defense","Curry")
+
+# 4) Plot actual + each fitted segment
+plot(
+  full_actual,
+  col  = "black",
+  lwd  = 1.5,
+  main = "Actual vs EraSpecific Fitted Values (ETS)",
+  xlab = "Date",
+  ylab = "3PM per Game"
+)
+cols <- c("red","blue","green","purple","orange")
+for(i in seq_len(ncol(all_fitted))) {
+  lines(all_fitted[,i], col = cols[i], lwd = 1.5)
+}
+
+# 5) Legend
+legend(
+  "topleft",
+  legend = c("Actual", colnames(all_fitted)),
+  col    = c("black", cols),
+  lty    = 1,
+  lwd    = 1.5,
+  bty    = "n"
+)
+
+```
+## Test model on a unseen data set (using train test split)
+
+We are testing two version of model here
+
+  - One that only uses the Curry era data
+  
+  - One that uses the Modern Era
+
+```{r}
+## 1) Split the raw data frame
+train_df <- filtered_data %>% filter(month < as.Date("2019-10-01"))
+test_df  <- filtered_data %>% filter(month >= as.Date("2019-10-01"))
+h        <- nrow(test_df)
+
+## 2) Build ts for each era on the TRAIN portion only
+ts_curry_tr  <- ts(train_df$FG3_per_game[train_df$curry_era == 1],
+                   start = c(2015,10), frequency = 8)
+ts_modern_tr <- ts(train_df$FG3_per_game[
+                     train_df$reverted_three_point_line == 1 |
+                     train_df$defensive_three_second_rule == 1 |
+                     train_df$curry_era == 1
+                   ],
+                   start = c(1997,10), frequency = 8)
+ts_full_tr  <- ts(train_df$FG3_per_game, start = c(1979,10), frequency = 8)
+
+## 3) Fit ETS and forecast
+fit_curry_ets  <- ets(ts_curry_tr)
+fit_modern_ets <- ets(ts_modern_tr)
+fit_full_ets  <- ets(ts_full_tr)
+
+fc_curry  <- forecast(fit_curry_ets,  h = h, level = c(80, 95))
+fc_modern <- forecast(fit_modern_ets, h = h, level = c(80, 95))
+fc_full  <- forecast(fit_full_ets,  h = h, level = c(80, 95))
+
+## 4) Wrap forecasts as zoo on the test_df dates
+zoo_fc_curry  <- zoo(as.numeric(fc_curry$mean),  order.by = test_df$month)
+zoo_fc_modern <- zoo(as.numeric(fc_modern$mean), order.by = test_df$month)
+zoo_fc_full  <- zoo(as.numeric(fc_full$mean),  order.by = test_df$month)
+
+# 4) Prepare data frames for ggplot
+# Historical full series
+df_hist <- data.frame(
+  date  = filtered_data$month,
+  value = filtered_data$FG3_per_game,
+  series = "Historical"
+)
+
+# Curry‐only forecast (test period)
+df_curry_fc <- data.frame(
+  date  = index(zoo_fc_curry),
+  value = coredata(zoo_fc_curry),
+  series = "Forecast_Curry"
+)
+
+# Modern‐era forecast (test period)
+df_modern_fc <- data.frame(
+  date  = index(zoo_fc_modern),
+  value = coredata(zoo_fc_modern),
+  series = "Forecast_Modern"
+)
+# Full‐era forecast (test period)
+df_full_fc <- data.frame(
+  date  = index(zoo_fc_full),
+  value = coredata(zoo_fc_full),
+  series = "Forecast_Full"
+)
+
+# 5) Combine and plot
+df_plot <- rbind(df_hist, df_curry_fc, df_modern_fc, df_full_fc)
+
+ggplot(df_plot, aes(x = date, y = value, color = series)) +
+  geom_line(data = subset(df_plot, series == "Historical"),     size = 0.8) +
+  geom_line(data = subset(df_plot, series == "Forecast_Modern"), size = 0.8) +
+  geom_line(data = subset(df_plot, series == "Forecast_Curry"),  size = 0.8) +
+  geom_line(data = subset(df_plot, series == "Forecast_Full"),    size = 0.8) +
+  scale_color_manual(
+    values = c(
+      Historical      = "grey",
+      Forecast_Modern = "green",
+      Forecast_Curry  = "blue",
+      Forecast_Full   = "orange"
+    ),
+    labels = c(
+      Historical      = "Historical/Actual",
+      Forecast_Modern = "ModernEra Forecast",
+      Forecast_Curry  = "CurryOnly Forecast",
+      Forecast_Full   = "FullEra Forecast"
+    )
+  ) +
+  labs(
+    title = "FG3 per Game: Historical vs Forecasts (ETS)",
+    x     = "Date",
+    y     = "3PM per Game",
+    color = ""   # removes the legend title
+  ) +
+  theme_minimal()
+```
+
+### Check ETS Parameters
+```{r}
+summary(fit_curry_ets)
+summary(fit_modern_ets)
+summary(fit_full_ets)
+```
+
+
+
+
+### Check residuals of the models
+```{r}
+checkresiduals(fit_curry_ets)
+checkresiduals(fit_modern_ets)
+checkresiduals(fit_full_ets)
+```
+Residual diagnostics: Curry‐Era (ETS(M,A,N))
+
+  - Ljung–Box: Q* = 4.96, df = 8, p = 0.762 → no evidence of autocorrelation.
+  
+  - ACF: all lags within ±2·SE, indicating whiteness.
+  
+  - Time plot: residuals randomly fluctuate around zero, no trend or seasonality.
+  
+  - Histogram: approximately Gaussian, centered at zero.
+  
+  - Conclusion: residuals behave like white noise, model is well‐specified.
+
+Residual diagnostics: Modern‐Era (ETS(M,A,N))
+
+  - Ljung–Box: Q* = 30.67, df = 24, p = 0.1635 → again, no significant autocorrelation.
+  
+  - ACF: small long‐lag spikes but still within confidence bounds.
+
+  - Time plot: no systematic pattern, residuals hover around zero.
+
+  - Histogram: roughly normal, with slight heavy tails.
+
+  - Conclusion: residuals pass the usual checks
+  
+## Calculate accuracy metrics
+```{r}
+# 1) Extract the actuals from the test set
+actual_test <- test_df$FG3_per_game
+
+# 2) Compute accuracy for each ARIMA forecast
+acc_curry_ets  <- accuracy(fc_curry,  actual_test)
+acc_modern_ets <- accuracy(fc_modern, actual_test)
+acc_full_ets  <- accuracy(fc_full,  actual_test)
+
+# 3) Combine into one table with model labels
+acc_comparison_ets <- rbind(
+  data.frame(Model = "Curry-Only", acc_curry_ets),
+  data.frame(Model = "Modern-Era", acc_modern_ets),
+  data.frame(Model = "Full-Era", acc_full_ets)
+)
+
+# 4) Print the comparison
+print(acc_comparison_ets)
+```
+**Comparison & conclusions**  
+
+  - The Modern-Era model cuts test RMSE and MAE by roughly half versus the Curry-Only model.  
+  
+  - Test MAPE and MASE for Modern-Era are also less than half of the Curry-Only values. 
+  
+  - Curry-Only generalizes poorly (test errors high), whereas Modern-Era delivers much tighter out-of-sample accuracy.
+  
+  - Training residual ACF1 is near zero (−0.013) for Modern-Era, indicating more white-noise residuals than Curry-Only
+  (ACF1 = 0.156).  
+  
+**Recommendation:** use the Modern-Era model for forecasting, as it clearly outperforms the Curry-Only approach on held-out data.  
